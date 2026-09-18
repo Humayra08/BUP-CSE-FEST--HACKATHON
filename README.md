@@ -4,8 +4,8 @@ LLM-assisted smart campus energy optimization service, built for the BUP CSE Fes
 
 GridWise accepts a 24-hour campus energy scenario along with 1–3 natural-language operator notes, interprets those notes with a language model, validates the interpretation deterministically, and solves for the lowest-cost 24-hour grid/solar/battery schedule that satisfies every constraint.
 
-- 🌐 Live API: `https://<your-render-url>.onrender.com`
-- 🐳 Docker image: `<your-dockerhub-username>/gridwise-llm:latest`
+- 🌐 Live API: `https://gridwise-llm-3p32.onrender.com`
+- 🐳 Docker image: `humayra08/gridwise-llm:latest` (digest `sha256:7661302b3638ccc26841342c6ae2c435cfe26e8691d04c32b87957bc0cc7c77b`)
 - 🔌 Endpoints: `GET /health`, `POST /optimize-energy`
 
 ## 🧠 How it works
@@ -49,7 +49,7 @@ At least one of `GROQ_API_KEY` or `OPENROUTER_API_KEY` is required. Everything e
 ## 🚀 Running locally
 
 ```bash
-git clone <this-repo-url>
+git clone https://github.com/Humayra08/BUP-CSE-FEST--HACKATHON.git
 cd BUP-CSE-FEST--HACKATHON
 
 python -m venv .venv
@@ -109,31 +109,45 @@ pytest -q
 
 38 tests covering schema validation, guardrail coercion of bad LLM output, optimizer correctness (energy balance, battery bounds, directive enforcement, end-of-day neutrality), and the API contract, including provider fallback and malformed input.
 
-To check the deterministic guardrail/optimizer path against the organizer's public samples without hitting a live LLM:
+To check the deterministic guardrail/optimizer/replay path against the organizer's public samples without hitting a live LLM (fast, no API keys needed):
 
 ```bash
-python scripts/run_public_samples.py sample_cases/public_samples.json --use-expected-directives
+python scripts/run_public_samples.py
+# -> 10/10 passed
 ```
 
-Separately, all 10 public sample cases were run end-to-end against a live instance of this service with real LLM calls: directive interpretation matched the expected output for all 10, every returned schedule replayed as valid, and total cost matched the reference optimum exactly, with response times consistently under 2 seconds.
+To exercise the full pipeline including real LLM calls against those same 10 cases (needs `GROQ_API_KEY`/`OPENROUTER_API_KEY` set):
+
+```bash
+python scripts/run_public_samples.py --live
+# -> 10/10 passed: correct directive_type/hours/applies for every note, every schedule valid, cost matches the reference optimum
+```
+
+Both were run against this service this session: 10/10 deterministic, 10/10 live (including the percentage-based reserve case, "keep at least 50% of battery capacity," which required passing battery capacity to the LLM so it can compute the kWh conversion itself rather than guessing). Live response times were consistently under 2 seconds, well inside the 5s p95 target.
 
 ## 🐳 Docker
 
 ```bash
-docker pull <your-dockerhub-username>/gridwise-llm:latest
+docker pull humayra08/gridwise-llm:latest
 
 docker run --rm -p 8000:8000 \
   -e GROQ_API_KEY=your_key_here \
   -e OPENROUTER_API_KEY=your_key_here \
-  <your-dockerhub-username>/gridwise-llm:latest
+  humayra08/gridwise-llm:latest
 
 curl http://localhost:8000/health
 ```
 
-The image listens on port 8000 (configurable via `PORT`), binds to `0.0.0.0`, and has no secrets baked in — keys are passed at `docker run` time. Build it yourself with:
+Pinned by digest instead of the mutable `:latest` tag, for reproducibility:
 
 ```bash
-docker build -t <your-dockerhub-username>/gridwise-llm:latest .
+docker pull humayra08/gridwise-llm@sha256:7661302b3638ccc26841342c6ae2c435cfe26e8691d04c32b87957bc0cc7c77b
+```
+
+The image listens on port 8000 (configurable via `PORT`), binds to `0.0.0.0`, and has no secrets baked in — keys are passed at `docker run` time via `-e`, never `COPY`'d into the image (`.dockerignore` excludes `.env`). Verified end-to-end: built, ran locally, pushed to Docker Hub, then the local copy was deleted and re-pulled fresh from the registry to confirm the pushed image itself (not just the local build) reaches `/health` correctly. Build it yourself with:
+
+```bash
+docker build -t humayra08/gridwise-llm:latest .
 ```
 
 ## ☁️ Deployment
