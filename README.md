@@ -4,7 +4,7 @@ LLM-assisted smart campus energy optimization service, built for the BUP CSE Fes
 
 GridWise accepts a 24-hour campus energy scenario along with 1–3 natural-language operator notes, interprets those notes with a language model, validates the interpretation deterministically, and solves for the lowest-cost 24-hour grid/solar/battery schedule that satisfies every constraint.
 
-- 🌐 Live API: `https://gridwise-llm-3p32.onrender.com`
+- 🌐 Live API: `https://gridwise-llm-3p32.onrender.com/docs`
 - 🐳 Docker image: `humayra08/gridwise-llm:latest` (digest `sha256:7661302b3638ccc26841342c6ae2c435cfe26e8691d04c32b87957bc0cc7c77b`)
 - 🔌 Endpoints: `GET /health`, `POST /optimize-energy`
 
