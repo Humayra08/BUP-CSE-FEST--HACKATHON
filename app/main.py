@@ -3,8 +3,8 @@ import logging
 import time
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
 
 from app import llm_interpreter, optimizer, replay_validator
 from app.schemas import OptimizeEnergyResponse, ScenarioRequest
@@ -20,6 +20,24 @@ app = FastAPI(title="GridWise LLM")
 # reserve a slice of that budget explicitly for the solver.
 REQUEST_DEADLINE_SECONDS = 22.0
 SOLVER_TIME_LIMIT_SECONDS = 5.0
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # FastAPI raises this both for malformed JSON bodies and for schema-invalid
+    # (but well-formed) JSON. The Problem Statement calls for 400 in both cases,
+    # not FastAPI's default 422. exc.errors() can embed a raw Python exception
+    # (e.g. a ValueError from a validator) in its "ctx" field, which JSONResponse
+    # cannot serialize on its own -- filter those out to keep the response JSON-safe.
+    safe_errors = []
+    for err in exc.errors():
+        err = dict(err)
+        err.pop("ctx", None)
+        safe_errors.append(err)
+    return JSONResponse(
+        status_code=400,
+        content={"error": "Invalid request schema.", "details": safe_errors},
+    )
 
 
 @app.get("/health")
@@ -94,24 +112,8 @@ async def _handle_optimize(scenario: ScenarioRequest) -> JSONResponse:
     return JSONResponse(status_code=200, content=response.model_dump())
 
 
-@app.post("/optimize-energy")
-async def optimize_energy(request: Request):
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "Malformed JSON body."})
-
-    try:
-        scenario = ScenarioRequest.model_validate(body)
-    except ValidationError as exc:
-        # exc.errors() can embed a raw Python exception (e.g. a ValueError raised inside
-        # a validator) in its "ctx" field, which JSONResponse cannot serialize and would
-        # turn a 400 into an unhandled 500. include_context=False keeps only JSON-safe data.
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Invalid request schema.", "details": exc.errors(include_context=False)},
-        )
-
+@app.post("/optimize-energy", response_model=OptimizeEnergyResponse)
+async def optimize_energy(scenario: ScenarioRequest):
     try:
         return await asyncio.wait_for(_handle_optimize(scenario), timeout=REQUEST_DEADLINE_SECONDS)
     except asyncio.TimeoutError:
