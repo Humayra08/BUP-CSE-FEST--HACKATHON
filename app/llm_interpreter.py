@@ -36,7 +36,7 @@ async def interpret_notes(operator_notes: List[str], battery_capacity_kwh: float
     """
     for provider_name, provider in (("groq", groq_provider), ("openrouter", openrouter_provider)):
         try:
-            raw = await provider.interpret(operator_notes)
+            raw = await provider.interpret(operator_notes, battery_capacity_kwh)
         except Exception as exc:
             logger.warning("%s interpretation call failed: %s", provider_name, exc)
             continue

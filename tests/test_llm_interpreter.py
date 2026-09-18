@@ -5,10 +5,10 @@ from app import llm_interpreter
 
 @pytest.mark.asyncio
 async def test_falls_back_to_openrouter_when_groq_errors(monkeypatch):
-    async def fake_groq(notes):
+    async def fake_groq(notes, battery_capacity_kwh):
         raise RuntimeError("groq down")
 
-    async def fake_openrouter(notes):
+    async def fake_openrouter(notes, battery_capacity_kwh):
         return [
             {
                 "note_index": 0,
@@ -33,7 +33,7 @@ async def test_falls_back_to_openrouter_when_groq_returns_malformed_directives(m
     invented type, out-of-range factor). That must trigger fallback just like a hard
     error, not be silently accepted as the final answer."""
 
-    async def fake_groq(notes):
+    async def fake_groq(notes, battery_capacity_kwh):
         return [
             {
                 "note_index": 0,
@@ -43,7 +43,7 @@ async def test_falls_back_to_openrouter_when_groq_returns_malformed_directives(m
             }
         ]
 
-    async def fake_openrouter(notes):
+    async def fake_openrouter(notes, battery_capacity_kwh):
         return [
             {
                 "note_index": 0,
@@ -65,7 +65,7 @@ async def test_falls_back_to_openrouter_when_groq_returns_malformed_directives(m
 
 @pytest.mark.asyncio
 async def test_falls_back_to_no_op_when_both_providers_fail(monkeypatch):
-    async def fake_fail(notes):
+    async def fake_fail(notes, battery_capacity_kwh):
         raise RuntimeError("down")
 
     monkeypatch.setattr(llm_interpreter.groq_provider, "interpret", fake_fail)
@@ -79,7 +79,7 @@ async def test_falls_back_to_no_op_when_both_providers_fail(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_uses_groq_result_when_it_succeeds(monkeypatch):
-    async def fake_groq(notes):
+    async def fake_groq(notes, battery_capacity_kwh):
         return [
             {
                 "note_index": 0,
@@ -90,7 +90,7 @@ async def test_uses_groq_result_when_it_succeeds(monkeypatch):
             }
         ]
 
-    async def fail_if_called(notes):
+    async def fail_if_called(notes, battery_capacity_kwh):
         raise AssertionError("openrouter should not be called")
 
     monkeypatch.setattr(llm_interpreter.groq_provider, "interpret", fake_groq)

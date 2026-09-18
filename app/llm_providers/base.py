@@ -27,13 +27,17 @@ Rules:
 - "hours" arrays must contain unique integers 0-23 in ascending order.
 - For no_op: applies=false, directive_type="no_op", structured_adjustment=null.
 - For every other type: applies=true and structured_adjustment must match the exact shape above.
-- Do NOT invent a directive type outside the six listed. Do NOT invent demand, tariff, or battery numbers.
+- Do NOT invent a directive type outside the six listed. Do NOT invent demand or tariff numbers.
 - If a note is ambiguous or does not describe an energy rule, use no_op.
+- You WILL be given the battery's total capacity in kWh below. If a reserve note states a PERCENTAGE of
+  capacity (e.g. "keep at least 50% of the battery"), compute minimum_energy_kwh = that percentage * capacity
+  yourself and use the resulting number — do not treat a percentage-based reserve as ambiguous or as no_op.
 
 Example notes and expected interpretation:
 "Solar output will drop to about 20% from 1 PM to 3 PM." -> solar_reduction; hours [13,14]; factor 0.2
 "Do not charge the battery between 2 PM and 4 PM." -> no_charge_window; hours [14,15]
 "Keep at least 120 kWh in reserve from 6 PM until 9 PM." -> minimum_battery_reserve; hours [18,19,20]; minimum_energy_kwh 120
+"Keep at least 50% of the battery capacity from 6 PM until 9 PM." (battery capacity 200 kWh) -> minimum_battery_reserve; hours [18,19,20]; minimum_energy_kwh 100
 "The cafeteria menu changes tomorrow." -> no_op
 
 Respond with STRICT JSON ONLY, no markdown, no commentary, in this exact shape:
@@ -45,9 +49,13 @@ One entry per note, in note_index order, covering every note exactly once.
 """
 
 
-def build_messages(operator_notes: List[str]) -> list:
+def build_messages(operator_notes: List[str], battery_capacity_kwh: float) -> list:
     numbered = "\n".join(f"{i}: {note}" for i, note in enumerate(operator_notes))
-    user_prompt = f"Operator notes:\n{numbered}\n\nReturn the JSON now."
+    user_prompt = (
+        f"Battery total capacity: {battery_capacity_kwh} kWh (use this only to convert "
+        f"percentage-based reserve notes into minimum_energy_kwh).\n\n"
+        f"Operator notes:\n{numbered}\n\nReturn the JSON now."
+    )
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -73,6 +81,7 @@ async def call_openai_compatible(
     api_key: str,
     model: str,
     operator_notes: List[str],
+    battery_capacity_kwh: float,
     timeout: float,
     extra_headers: dict | None = None,
     extra_payload: dict | None = None,
@@ -85,7 +94,7 @@ async def call_openai_compatible(
 
     payload = {
         "model": model,
-        "messages": build_messages(operator_notes),
+        "messages": build_messages(operator_notes, battery_capacity_kwh),
         "temperature": 0,
         "response_format": {"type": "json_object"},
         "max_completion_tokens": 1200,

@@ -1,18 +1,23 @@
-"""Regression runner for the organizers' public sample cases.
+"""Regression runner for the organizers' public sample cases
+(sample_cases/public_samples.json, official GridWise pack schema: top-level
+"cases": [{"input": <request>, "expected_output": {...}}, ...]).
+
+Two modes:
+
+  --deterministic (default): bypasses the LLM and feeds each case's own
+    expected_output.directive_interpretation straight into guardrails ->
+    optimizer -> replay_validator. Isolates optimizer/guardrail/replay
+    correctness from live LLM accuracy — this is what should be run in CI /
+    before every commit, since it needs no API keys and is fast.
+
+  --live: calls the FastAPI app's real LLM interpretation path (needs
+    GROQ_API_KEY / OPENROUTER_API_KEY in the environment) and compares the
+    LLM's interpretation against each case's expected directive_type/hours/
+    applies, then checks the resulting schedule and cost.
 
 Usage:
-    python scripts/run_public_samples.py sample_cases/public_samples.json
-
-Expects a JSON file shaped as a list of objects, each with:
-  - "request": the full POST /optimize-energy request body
-  - "expected_total_cost_bdt" (optional): reference optimal cost to compare against
-  - "expected_directives" (optional): list of {note_index, directive_type, applies}
-    to check interpretation against, independent of the live LLM
-
-This calls the FastAPI app in-process (no server/network needed) so it also works
-offline against mocked directives if "expected_directives" is supplied via
---use-expected-directives, bypassing the LLM entirely to isolate optimizer/guardrail
-correctness from language-model accuracy.
+    python scripts/run_public_samples.py                # deterministic
+    python scripts/run_public_samples.py --live          # full pipeline incl. LLM
 """
 import argparse
 import asyncio
@@ -22,73 +27,129 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import guardrails, optimizer, replay_validator  # noqa: E402
+from app import guardrails, llm_interpreter, optimizer, replay_validator  # noqa: E402
 from app.schemas import ScenarioRequest  # noqa: E402
 
+DEFAULT_SAMPLES = Path(__file__).resolve().parent.parent / "sample_cases" / "public_samples.json"
+COST_TOL_FRACTION = 0.001  # 0.1% relative, floor of 0.01 BDT per spec's numeric tolerance
 
-def run_case(case: dict, use_expected_directives: bool) -> dict:
-    request_body = case["request"]
-    scenario = ScenarioRequest.model_validate(request_body)
+
+def _adjustment_matches(actual: dict, expected: dict) -> bool:
+    if actual is None or expected is None:
+        return actual == expected
+    if actual.get("hours") != expected.get("hours"):
+        return False
+    for key in ("factor", "minimum_energy_kwh", "max_grid_kwh"):
+        if key in expected and abs(actual.get(key, float("nan")) - expected[key]) > 0.01:
+            return False
+    return True
+
+
+def _score_interpretation(actual: list, expected: list) -> dict:
+    total = len(expected)
+    matched = 0
+    mismatches = []
+    for exp in expected:
+        idx = exp["note_index"]
+        act = next((a for a in actual if a["note_index"] == idx), None)
+        ok = (
+            act is not None
+            and act["applies"] == exp["applies"]
+            and act["directive_type"] == exp["directive_type"]
+            and _adjustment_matches(act.get("structured_adjustment"), exp.get("structured_adjustment"))
+        )
+        if ok:
+            matched += 1
+        else:
+            mismatches.append({"note_index": idx, "expected": exp, "actual": act})
+    return {"matched": matched, "total": total, "mismatches": mismatches}
+
+
+def run_deterministic(case: dict) -> dict:
+    scenario = ScenarioRequest.model_validate(case["input"])
     hours_sorted = sorted((h.model_dump() for h in scenario.hours), key=lambda h: h["hour"])
     battery = scenario.battery.model_dump()
 
-    if use_expected_directives and "expected_directives" in case:
-        raw = case["expected_directives"]
-    else:
-        raise SystemExit(
-            "This runner only exercises the deterministic optimizer/guardrail path. "
-            "Pass --use-expected-directives with a sample file that includes "
-            "'expected_directives', or hit the live HTTP API for end-to-end LLM testing."
-        )
-
+    expected_directives = case["expected_output"]["directive_interpretation"]
     directive_interpretation, all_valid = guardrails.validate_directives(
-        raw, len(scenario.operator_notes), battery["capacity_kwh"]
+        expected_directives, len(scenario.operator_notes), battery["capacity_kwh"]
     )
     hourly_plan = optimizer.solve_schedule(hours_sorted, battery, directive_interpretation)
     is_valid, totals = replay_validator.replay_and_recompute(
         hourly_plan, hours_sorted, battery, directive_interpretation
     )
 
-    result = {
-        "scenario_id": scenario.scenario_id,
+    expected_cost = case["expected_output"]["total_cost_bdt"]
+    cost_ok = is_valid and abs(totals.get("total_cost_bdt", float("inf")) - expected_cost) <= max(
+        0.01, COST_TOL_FRACTION * expected_cost
+    )
+
+    return {
+        "id": case["id"],
         "guardrails_all_valid": all_valid,
         "schedule_valid": is_valid,
         "totals": totals,
+        "expected_cost": expected_cost,
+        "cost_ok": cost_ok,
+        "pass": is_valid and cost_ok,
     }
 
-    expected_cost = case.get("expected_total_cost_bdt")
-    if expected_cost is not None and is_valid:
-        result["cost_delta_bdt"] = round(totals["total_cost_bdt"] - expected_cost, 4)
-        result["cost_matches"] = abs(result["cost_delta_bdt"]) <= max(0.01, 0.001 * expected_cost)
 
-    return result
+async def run_live(case: dict) -> dict:
+    scenario = ScenarioRequest.model_validate(case["input"])
+    hours_sorted = sorted((h.model_dump() for h in scenario.hours), key=lambda h: h["hour"])
+    battery = scenario.battery.model_dump()
+
+    directive_interpretation, degraded = await llm_interpreter.interpret_notes(
+        scenario.operator_notes, battery["capacity_kwh"]
+    )
+    interp_score = _score_interpretation(directive_interpretation, case["expected_output"]["directive_interpretation"])
+
+    hourly_plan = optimizer.solve_schedule(hours_sorted, battery, directive_interpretation)
+    is_valid, totals = replay_validator.replay_and_recompute(
+        hourly_plan, hours_sorted, battery, directive_interpretation
+    )
+
+    expected_cost = case["expected_output"]["total_cost_bdt"]
+    cost_ok = is_valid and abs(totals.get("total_cost_bdt", float("inf")) - expected_cost) <= max(
+        0.01, COST_TOL_FRACTION * expected_cost
+    )
+
+    return {
+        "id": case["id"],
+        "degraded": degraded,
+        "interpretation_matched": f"{interp_score['matched']}/{interp_score['total']}",
+        "mismatches": interp_score["mismatches"],
+        "schedule_valid": is_valid,
+        "totals": totals,
+        "expected_cost": expected_cost,
+        "cost_ok": cost_ok,
+        "pass": is_valid and cost_ok and interp_score["matched"] == interp_score["total"],
+    }
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("samples_file", type=Path)
-    parser.add_argument(
-        "--use-expected-directives",
-        action="store_true",
-        help="Bypass the LLM and use each case's 'expected_directives' to test optimizer/guardrail correctness in isolation.",
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("samples_file", type=Path, nargs="?", default=DEFAULT_SAMPLES)
+    parser.add_argument("--live", action="store_true", help="Exercise the real LLM interpretation path.")
     args = parser.parse_args()
 
-    cases = json.loads(args.samples_file.read_text())
+    pack = json.loads(args.samples_file.read_text(encoding="utf-8"))
+    cases = pack["cases"]
+
     failures = 0
     for case in cases:
         try:
-            result = run_case(case, args.use_expected_directives)
+            result = asyncio.run(run_live(case)) if args.live else run_deterministic(case)
         except Exception as exc:  # noqa: BLE001
-            print(f"[ERROR] {case.get('request', {}).get('scenario_id', '?')}: {exc}")
+            print(f"[ERROR] {case['id']}: {exc!r}")
             failures += 1
             continue
 
-        ok = result["schedule_valid"] and result.get("cost_matches", True)
-        status = "PASS" if ok else "FAIL"
-        if not ok:
+        status = "PASS" if result["pass"] else "FAIL"
+        if not result["pass"]:
             failures += 1
-        print(f"[{status}] {json.dumps(result)}")
+        print(f"[{status}] {case['id']}: {json.dumps(result, default=str)}")
 
     print(f"\n{len(cases) - failures}/{len(cases)} passed")
     sys.exit(1 if failures else 0)
